@@ -1,5 +1,6 @@
 #include <iostream>
 
+#include "ros/init.h"
 #include "window.hpp"
 
 #include "libobsensor/hpp/Pipeline.hpp"
@@ -7,8 +8,15 @@
 #include <mutex>
 #include <thread>
 
+#include <ros/ros.h>
+#include <image_transport/image_transport.h>
+#include <sensor_msgs/Image.h>
+#include <sensor_msgs/CompressedImage.h>
+#include <sensor_msgs/CameraInfo.h>
+#include <cv_bridge/cv_bridge.h>
+#include <opencv2/opencv.hpp>
 
-static bool  sync         = false;
+static bool  sync1         = false;
 static bool  started      = true;
 static bool  hd2c         = false;
 static bool  sd2c         = true;
@@ -90,8 +98,8 @@ void keyEventProcess(Window &app, ob::Pipeline &pipe, std::shared_ptr<ob::Config
     }
     else if(key == 'F' || key == 'f') {
         // Press the F key to switch synchronization
-        sync = !sync;
-        if(sync) {
+        sync1 = !sync1;
+        if(sync1) {
             try {
                 // enable synchronization
                 pipe.enableFrameSync();
@@ -112,65 +120,153 @@ void keyEventProcess(Window &app, ob::Pipeline &pipe, std::shared_ptr<ob::Config
     }
 }
 
-int main() {
-    // Create a pipeline with default device
-    ob::Pipeline pipe;
+sensor_msgs::CameraInfo createCameraInfo(const std::string& frame_id, double fx, double fy, double cx, double cy, int width, int height, 
+                                         const std::vector<double>& distortion, float R[9], float t[3]) {
+  sensor_msgs::CameraInfo cam_info;
+  cam_info.header.frame_id = frame_id;
 
-    // Configure which streams to enable or disable for the Pipeline by creating a Config
-    std::shared_ptr<ob::Config> config = std::make_shared<ob::Config>();
+  cam_info.width = width;
+  cam_info.height = height;
 
-    std::shared_ptr<ob::VideoStreamProfile> colorProfile = nullptr;
-    try {
-        // Get all stream profiles of the color camera, including stream resolution, frame rate, and frame format
-        auto colorProfiles = pipe.getStreamProfileList(OB_SENSOR_COLOR);
-        if(colorProfiles) {
-            colorProfile = std::const_pointer_cast<ob::StreamProfile>(colorProfiles->getProfile(OB_PROFILE_DEFAULT))->as<ob::VideoStreamProfile>();
-        }
-        config->enableStream(colorProfile);
+  cam_info.K[0] = fx;
+  cam_info.K[2] = cx;
+  cam_info.K[4] = fy;
+  cam_info.K[5] = cy;
+  cam_info.K[8] = 1.0;
+
+  // 投影矩阵 P
+  // cam_info.P[0] = fx;
+  // cam_info.P[2] = cx;
+  // cam_info.P[5] = fy;
+  // cam_info.P[6] = cy;
+  // cam_info.P[10] = 1.0;
+  cam_info.P[0] = R[0], cam_info.P[1] = R[1], cam_info.P[2] = R[2], cam_info.P[3] = t[0] / 1000.;  // TODO: 都存的depth->rgb外参
+  cam_info.P[4] = R[3], cam_info.P[5] = R[4], cam_info.P[6] = R[5], cam_info.P[7] = t[1] / 1000.;
+  cam_info.P[8] = R[6], cam_info.P[9] = R[7], cam_info.P[10] = R[8], cam_info.P[11] = t[2] / 1000.;
+
+  // 畸变参数 D
+  cam_info.distortion_model = "plumb_bob"; // 常见畸变模型
+  cam_info.D = distortion;
+
+  return cam_info;
+}
+
+int main(int argc, char **argv) {
+  ros::init(argc, argv, "orbbec_camera");
+  ros::NodeHandle nh;
+
+  image_transport::ImageTransport it(nh);
+  image_transport::Publisher rgb_pub = it.advertise("/camera/color/image_raw", 1);
+  image_transport::Publisher depth_pub = it.advertise("/camera/depth/image_raw", 1);
+  ros::Publisher rgb_info_pub = nh.advertise<sensor_msgs::CameraInfo>("/camera/color/camera_info", 1);
+  ros::Publisher depth_info_pub = nh.advertise<sensor_msgs::CameraInfo>("/camera/depth/camera_info", 1);
+
+
+  ob::Pipeline pipe;
+
+  auto device = pipe.getDevice();
+  auto depthModeList = device->getDepthWorkModeList();
+  device->switchDepthWorkMode((*depthModeList)[1].name);
+
+
+
+  // Configure which streams to enable or disable for the Pipeline by creating a Config
+  std::shared_ptr<ob::Config> config = std::make_shared<ob::Config>();
+
+  std::shared_ptr<ob::VideoStreamProfile> colorProfile = nullptr;
+  try {
+    // Get all stream profiles of the color camera, including stream resolution, frame rate, and frame format
+    auto colorProfiles = pipe.getStreamProfileList(OB_SENSOR_COLOR);
+    if(colorProfiles) {
+      colorProfile = std::const_pointer_cast<ob::StreamProfile>(colorProfiles->getProfile(OB_PROFILE_DEFAULT))->as<ob::VideoStreamProfile>();
+      std::cout << colorProfile->format() << " " << colorProfile->fps() << " " << colorProfile->width() << " " << colorProfile->height() << std::endl;
     }
-    catch(...) {
-        std::cerr << "Current device is not support color sensor!" << std::endl;
-        exit(EXIT_FAILURE);
-    }
+    config->enableStream(colorProfile);
+  } catch(...) {
+    std::cerr << "Current device is not support color sensor!" << std::endl;
+    exit(EXIT_FAILURE);
+  }
 
-    // Get all stream profiles of the depth camera, including stream resolution, frame rate, and frame format
-    auto                                    depthProfiles = pipe.getStreamProfileList(OB_SENSOR_DEPTH);
-    std::shared_ptr<ob::VideoStreamProfile> depthProfile  = nullptr;
-    if(depthProfiles) {
-        depthProfile = std::const_pointer_cast<ob::StreamProfile>(depthProfiles->getProfile(OB_PROFILE_DEFAULT))->as<ob::VideoStreamProfile>();
-    }
-    config->enableStream(depthProfile);
+  // Get all stream profiles of the depth camera, including stream resolution, frame rate, and frame format
+  auto                                    depthProfiles = pipe.getStreamProfileList(OB_SENSOR_DEPTH);
+  std::shared_ptr<ob::VideoStreamProfile> depthProfile  = nullptr;
+  if(depthProfiles) {
+    depthProfile = std::const_pointer_cast<ob::StreamProfile>(depthProfiles->getProfile(OB_PROFILE_DEFAULT))->as<ob::VideoStreamProfile>();
+    std::cout << depthProfile->format() << " " << depthProfile->fps() << " " << depthProfile->width() << " " << depthProfile->height() << std::endl;
+    // depthProfile.
+  }
+  config->enableStream(depthProfile);
 
-    // Configure the alignment mode as hardware D2C alignment
-    config->setAlignMode(ALIGN_D2C_HW_MODE);
+  // Configure the alignment mode as hardware D2C alignment
+  // config->setAlignMode(ALIGN_D2C_HW_MODE);
 
-    // Start the pipeline with config
-    try {
-        pipe.start(config);
-    }
-    catch(ob::Error &e) {
-        std::cerr << "function:" << e.getName() << "\nargs:" << e.getArgs() << "\nmessage:" << e.getMessage() << "\ntype:" << e.getExceptionType() << std::endl;
-    }
+  // Start the pipeline with config
+  try {
+    pipe.start(config);
+    pipe.enableFrameSync();
+  } catch(ob::Error &e) {
+    std::cerr << "function:" << e.getName() << "\nargs:" << e.getArgs() << "\nmessage:" << e.getMessage() << "\ntype:" << e.getExceptionType() << std::endl;
+  }
 
-    // Create a window for rendering and set the resolution of the window
-    Window app("SyncAlignViewer", colorProfile->width(), colorProfile->height(), RENDER_OVERLAY);
-    while(app) {
-        keyEventProcess(app, pipe, config);
+  auto info = pipe.getCameraParam();
+  auto rgb_intr = info.rgbIntrinsic;
+  auto depth_intr = info.depthIntrinsic;
+  std::vector<double> rgb_D{info.rgbDistortion.k1, info.rgbDistortion.k2, info.rgbDistortion.p1, info.rgbDistortion.p2, info.rgbDistortion.k3};
+  std::vector<double> depth_D{info.depthDistortion.k1, info.depthDistortion.k2, info.depthDistortion.p1, info.depthDistortion.p2, info.depthDistortion.k3};
+  sensor_msgs::CameraInfo rgb_camera_info = createCameraInfo("rgb", rgb_intr.fx, rgb_intr.fy, rgb_intr.cx, rgb_intr.cy, rgb_intr.width, rgb_intr.height, rgb_D, info.transform.rot, info.transform.trans);
+  sensor_msgs::CameraInfo depth_camera_info = createCameraInfo("depth", depth_intr.fx, depth_intr.fy, depth_intr.cx, depth_intr.cy, depth_intr.width, depth_intr.height, depth_D, info.transform.rot, info.transform.trans);
 
-        auto frameSet = pipe.waitForFrames(100);
-        if(frameSet == nullptr) {
-            continue;
-        }
+  // Create a window for rendering and set the resolution of the window
+  // Window app("SyncAlignViewer", colorProfile->width(), colorProfile->height(), RENDER_OVERLAY);
+  int i = 0;
+  while(ros::ok()) {
+      // keyEventProcess(app, pipe, config);
 
-        auto colorFrame = frameSet->colorFrame();
-        auto depthFrame = frameSet->depthFrame();
-        if(colorFrame != nullptr && depthFrame != nullptr) {
-            app.addToRender({ colorFrame, depthFrame });
-        }
-    }
+      auto frameSet = pipe.waitForFrames(100);
+      if(frameSet == nullptr) {
+        continue;
+      }
 
-    // Stop the Pipeline, no frame data will be generated
-    pipe.stop();
+      auto colorFrame = frameSet->colorFrame();
+      auto depthFrame = frameSet->depthFrame();
+      // std::cout << i++ << std::endl;
+      if(colorFrame != nullptr && depthFrame != nullptr) {
+
+        auto info = pipe.getCameraParam();
+        // std::cout << info.depthDistortion.k1 << " " << info.depthIntrinsic.cx << " " << info.rgbIntrinsic.cx << std::endl;
+        // std::cout << depthFrame->width() << " " <<  colorFrame->width() << std::endl;
+        // std::cout <<colorFrame->format() << " " << depthFrame->format() << std::endl;
+        // std::cout << colorFrame->timeStamp() << " " << colorFrame->timeStamp() - depthFrame->timeStamp() << std::endl;
+        // app.addToRender({ colorFrame, depthFrame });
+
+        auto rgb_video_frame = colorFrame->as<ob::VideoFrame>();
+
+        cv::Mat rgb_raw_mat(1, rgb_video_frame->dataSize(), CV_8UC1, rgb_video_frame->data());
+        cv::Mat rgb_image = cv::imdecode(rgb_raw_mat, 1);
+
+        ros::Time timestamp = ros::Time::now();
+        std_msgs::Header header;
+        header.stamp = timestamp;
+        cv_bridge::CvImage rgb_msg(header, "bgr8", rgb_image);
+        rgb_pub.publish(rgb_msg.toImageMsg());
+        rgb_info_pub.publish(rgb_camera_info);
+
+        cv::Mat depth_image;
+        auto depth_video_frame = depthFrame->as<ob::VideoFrame>();
+        cv::Mat depth_raw_mat = cv::Mat(depth_video_frame->height(), depth_video_frame->width(), CV_16UC1, depth_video_frame->data());
+        float scale = depth_video_frame->as<ob::DepthFrame>()->getValueScale();
+
+        // threshold to 5.12m
+        cv::threshold(depth_raw_mat, depth_image, 5120.0f / scale, 0, cv::THRESH_TRUNC);  // 16UC1  单位毫米
+        cv_bridge::CvImage depth_msg(header, "16UC1", depth_image);
+        depth_pub.publish(depth_msg.toImageMsg());
+        depth_info_pub.publish(depth_camera_info);
+      }
+      ros::spinOnce();
+  }
+
+  // Stop the Pipeline, no frame data will be generated
+  pipe.stop();
 
   return 0;
 }

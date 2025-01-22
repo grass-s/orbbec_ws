@@ -166,7 +166,7 @@ int main(int argc, char **argv) {
 
   auto device = pipe.getDevice();
   auto depthModeList = device->getDepthWorkModeList();
-  device->switchDepthWorkMode((*depthModeList)[1].name);
+  device->switchDepthWorkMode((*depthModeList)[1].name);  // 0：近距离； 1：远距离
 
 
 

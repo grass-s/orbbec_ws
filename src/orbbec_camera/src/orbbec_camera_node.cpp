@@ -9,6 +9,7 @@
 #include <thread>
 
 #include <ros/ros.h>
+#include <std_msgs/Bool.h>
 #include <image_transport/image_transport.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/CompressedImage.h>
@@ -120,6 +121,9 @@ void keyEventProcess(Window &app, ob::Pipeline &pipe, std::shared_ptr<ob::Config
     }
 }
 
+bool update_exposure = false;
+bool autoexposure = true;
+
 sensor_msgs::CameraInfo createCameraInfo(const std::string& frame_id, double fx, double fy, double cx, double cy, int width, int height, 
                                          const std::vector<double>& distortion, float R[9], float t[3]) {
   sensor_msgs::CameraInfo cam_info;
@@ -151,6 +155,12 @@ sensor_msgs::CameraInfo createCameraInfo(const std::string& frame_id, double fx,
   return cam_info;
 }
 
+void exposureCallback(const std_msgs::Bool::ConstPtr& msg) {
+    autoexposure = msg->data;
+    update_exposure = true;
+    ROS_INFO("Received autoexposure: %s", msg->data ? "true" : "false");
+}
+
 int main(int argc, char **argv) {
   ros::init(argc, argv, "orbbec_camera");
   ros::NodeHandle nh;
@@ -160,6 +170,7 @@ int main(int argc, char **argv) {
   image_transport::Publisher depth_pub = it.advertise("/camera/depth/image_raw", 1);
   ros::Publisher rgb_info_pub = nh.advertise<sensor_msgs::CameraInfo>("/camera/color/camera_info", 1);
   ros::Publisher depth_info_pub = nh.advertise<sensor_msgs::CameraInfo>("/camera/depth/camera_info", 1);
+  ros::Subscriber sub = nh.subscribe("/autoexposure", 10, exposureCallback);
 
 
   ob::Pipeline pipe;
@@ -221,6 +232,10 @@ int main(int argc, char **argv) {
   int i = 0;
   while(ros::ok()) {
       // keyEventProcess(app, pipe, config);
+      if (update_exposure) {
+        device->setBoolProperty(OB_PROP_COLOR_AUTO_EXPOSURE_BOOL, autoexposure);
+        update_exposure = false;
+      }
 
       auto frameSet = pipe.waitForFrames(100);
       if(frameSet == nullptr) {

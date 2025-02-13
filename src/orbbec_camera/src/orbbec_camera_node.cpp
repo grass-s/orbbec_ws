@@ -80,6 +80,8 @@ int main(int argc, char **argv) {
   int devCount = devList->deviceCount();
   image_transport::ImageTransport it(nh);
 
+  std::cout << "dev count: " << devCount << std::endl;
+
   for(int i = 0; i < devCount; i++) {
     std::string rgb_topic = "/camera/color/image_raw_" + std::to_string(i);
     std::string depth_topic = "/camera/depth/image_raw_" + std::to_string(i);
@@ -138,15 +140,17 @@ int main(int argc, char **argv) {
     //   std::cerr << "function:" << e.getName() << "\nargs:" << e.getArgs() << "\nmessage:" << e.getMessage() << "\ntype:" << e.getExceptionType() << std::endl;
     // }
 
-    pipe->start(config, [i](std::shared_ptr<ob::FrameSet> frameSet) {
-        std::lock_guard<std::mutex> lock(frameMutex);
-        if(frameSet->colorFrame()) {
-            colorFrames[i] = frameSet->colorFrame();
-        }
-        if(frameSet->depthFrame()) {
-            depthFrames[i] = frameSet->depthFrame();
-        }
-    });
+    // pipe->start(config, [i](std::shared_ptr<ob::FrameSet> frameSet) {
+    //     std::lock_guard<std::mutex> lock(frameMutex);
+    //     if(frameSet->colorFrame()) {
+    //         colorFrames[i] = frameSet->colorFrame();
+    //     }
+    //     if(frameSet->depthFrame()) {
+    //         depthFrames[i] = frameSet->depthFrame();
+    //     }
+    // });
+    pipe->start(config);
+    pipe->enableFrameSync();
 
     auto info = pipe->getCameraParam();
     auto rgb_intr = info.rgbIntrinsic;
@@ -164,22 +168,31 @@ int main(int argc, char **argv) {
 
   while(ros::ok()) {
     // keyEventProcess(app, pipe, config);
-    frames.clear();
     {
       std::lock_guard<std::mutex> lock(frameMutex);
       int i = 0;
       for(auto pipe: pipes) {
-        if(colorFrames[i] != nullptr) {
-          frames.emplace_back(colorFrames[i]);
-        }
-        if(depthFrames[i] != nullptr) {
-          frames.emplace_back(depthFrames[i]);
-        }
-        i++;
-        auto colorFrame = frames[0];
-        auto depthFrame = frames[1];
+        // frames.clear();
+        // if(colorFrames[i] != nullptr) {
+        //   frames.emplace_back(colorFrames[i]);
+        // }
+        // if(depthFrames[i] != nullptr) {
+        //   frames.emplace_back(depthFrames[i]);
+        // }
 
-        if(colorFrame != nullptr && depthFrame != nullptr) {
+        // if(frames.size() == 2) {
+        // // if(colorFrame != nullptr && depthFrame != nullptr) {
+        //   auto colorFrame = frames[0];
+        //   auto depthFrame = frames[1];
+      auto frameSet = pipe->waitForFrames(100);
+      if(frameSet == nullptr) {
+        continue;
+      }
+
+      auto colorFrame = frameSet->colorFrame();
+      auto depthFrame = frameSet->depthFrame();
+      // std::cout << i++ << std::endl;
+      if(colorFrame != nullptr && depthFrame != nullptr) {
           auto rgb_video_frame = colorFrame->as<ob::VideoFrame>();
 
           cv::Mat rgb_raw_mat(1, rgb_video_frame->dataSize(), CV_8UC1, rgb_video_frame->data());
